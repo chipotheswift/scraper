@@ -3,7 +3,7 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 
 puppeteer.use(StealthPlugin());
 
-async function scrapeProduct(url) {
+async function scrapeJomashopProduct(url) {
   const browser = await puppeteer.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -19,101 +19,104 @@ async function scrapeProduct(url) {
   // Set viewport
   await page.setViewport({ width: 1920, height: 1080 });
 
-  // Add extra headers
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-US,en;q=0.9",
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-  });
-
-  // Navigate to Amazon homepage first (more natural behavior)
-  console.log("Visiting Amazon homepage...");
-  await page.goto("https://www.amazon.com", { waitUntil: "networkidle2" });
-  await new Promise((r) => setTimeout(r, 2000));
-
-  // Then navigate to the product
+  // Navigate to the product page with a more forgiving wait strategy
   console.log("Navigating to product page...");
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+  try {
+    await page.goto(url, { 
+      waitUntil: "domcontentloaded",
+      timeout: 30000 
+    });
+  } catch (error) {
+    console.log("Initial load timed out, but continuing anyway...");
+  }
 
-  // Wait a bit more for content to load
-  await new Promise((r) => setTimeout(r, 3000));
+  // Wait for specific elements to appear
+  console.log("Waiting for page elements...");
+  try {
+    await page.waitForSelector("#product-h1-product-name, .brand-name", { timeout: 10000 });
+  } catch (error) {
+    console.log("Some elements didn't load, continuing...");
+  }
+
+  // Additional wait for any dynamic content
+  await new Promise((r) => setTimeout(r, 5000));
 
   // Take screenshot for debugging
-  await page.screenshot({ path: "debug.png", fullPage: true });
+  await page.screenshot({ path: "jomashop_debug.png", fullPage: true });
 
-  const html = await page.content();
   console.log("Page title:", await page.title());
-  console.log("HTML length:", html.length);
 
-  // Check if we hit bot detection
-  const bodyText = await page.evaluate(() => document.body.innerText);
-  if (
-    bodyText.includes("Enter the characters") ||
-    bodyText.includes("click the button") ||
-    bodyText.includes("Robot Check")
-  ) {
-    console.log("⚠️  Bot detection triggered!");
-    console.log("Amazon has blocked this request.");
-    console.log("\nAlternatives:");
-    console.log("1. Use Amazon Product Advertising API (official)");
-    console.log("2. Use a proxy/residential IP service");
-    console.log("3. Try running with headless: false to see the page");
-    await browser.close();
-    return;
-  }
+  // Check page content length
+  const html = await page.content();
+  console.log("HTML length:", html.length);
 
   // --- Scrape Image URL ---
   const imgURL = await page.evaluate(() => {
-    const img =
-      document.querySelector("#landingImage") ||
-      document.querySelector('img[data-a-dynamic-image]') ||
-      document.querySelector(".a-dynamic-image") ||
-      document.querySelector("#imgBlkFront") ||
-      document.querySelector("#ebooksImgBlkFront");
-    return img ? img.src : "No image found";
+    const img = document.querySelector("#product-main-image-gallery");
+    if (img && img.src) {
+      return img.src.split('?')[0];
+    }
+    return "No image found";
   });
 
   // --- Scrape Product Title ---
   const title = await page.evaluate(() => {
-    const titleEl =
-      document.querySelector("#productTitle") ||
-      document.querySelector("#ebooksProductTitle");
+    const titleEl = document.querySelector("#product-h1-product-name");
     return titleEl ? titleEl.textContent.trim() : "No title found";
   });
 
-  // --- Scrape Product Price ---
+  // --- Scrape Brand Name ---
+  const brand = await page.evaluate(() => {
+    const brandEl = document.querySelector(".brand-name");
+    return brandEl ? brandEl.textContent.trim() : "No brand found";
+  });
+
+  // --- Scrape Product Price (NOW PRICE with discount) ---
   const price = await page.evaluate(() => {
+    // First, try to get the "now price" from the discount section
+    const nowPriceDiv = document.querySelector(".now-price span");
+    if (nowPriceDiv) {
+      const priceText = nowPriceDiv.textContent.trim();
+      if (priceText.includes("$")) {
+        return priceText;
+      }
+    }
+
+    // Fallback to other price selectors
     const selectors = [
-      ".a-price .a-offscreen",
-      "#priceblock_ourprice",
-      "#priceblock_dealprice",
-      'span.a-price span[aria-hidden="true"]',
-      ".a-price-whole",
-      "#kindle-price",
-      ".a-color-price",
+      ".price-box .price",
+      ".product-info-price .price",
+      '[data-price-type="finalPrice"] .price',
+      ".price-wrapper .price",
     ];
 
     for (const selector of selectors) {
       const priceEl = document.querySelector(selector);
-      if (priceEl && priceEl.textContent.trim()) {
+      if (priceEl && priceEl.textContent.trim().includes("$")) {
         return priceEl.textContent.trim();
       }
     }
+
     return "No price found";
   });
 
   // Log the scraped data
   console.log("\n--- Scraped Data ---");
-  console.log({ imgURL, title, price });
+  console.log({
+    brand,
+    title,
+    price,
+    imgURL,
+  });
 
   // Close the browser
   await browser.close();
 }
 
-// Example usage:
+// Correct URL:
 const url =
-  "https://www.amazon.com/Black-Swan-Improbable-Robustness-Fragility/dp/081297381X/";
+  "https://www.jomashop.com/french-avenue-unisex-royal-taboo-aromatix-edp-spray-3-3-oz-fragrances-6290360379227.html";
 
-scrapeProduct(url).catch((error) => {
+scrapeJomashopProduct(url).catch((error) => {
   console.error("Error:", error);
 });
